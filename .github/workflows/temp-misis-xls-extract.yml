@@ -12,104 +12,69 @@ jobs:
   extract:
     runs-on: ubuntu-latest
     steps:
-      - name: Download and inspect MISIS schedule
+      - name: Verify all BBI-26 Saturday cells
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --disable-pip-version-check -q requests xlrd
           python - <<'PY'
           import re
-          import sys
           import requests
           import xlrd
 
-          URL = 'https://misis.ru/files/-/a20e90e9422cb6229fc49ee8005324ac/itkn-250826.xls'
-          r = requests.get(URL, timeout=45, headers={'User-Agent': 'Mozilla/5.0'})
-          print('HTTP_STATUS', r.status_code)
-          print('CONTENT_TYPE', r.headers.get('content-type'))
-          print('BYTES', len(r.content))
+          url='https://misis.ru/files/-/a20e90e9422cb6229fc49ee8005324ac/itkn-250826.xls'
+          r=requests.get(url, timeout=45, headers={'User-Agent':'Mozilla/5.0'})
+          print('HTTP', r.status_code, 'BYTES', len(r.content), 'TYPE', r.headers.get('content-type'))
           r.raise_for_status()
-          if len(r.content) < 1000:
-              raise RuntimeError('Downloaded file is unexpectedly small')
-          if r.content[:8] != bytes.fromhex('D0CF11E0A1B11AE1'):
-              print('WARNING: OLE2 signature not found:', r.content[:16].hex())
+          wb=xlrd.open_workbook(file_contents=r.content)
+          sh=wb.sheet_by_name('1 курс')
 
-          book = xlrd.open_workbook(file_contents=r.content, formatting_info=False)
-          print('SHEETS', book.sheet_names())
-          pat = re.compile(r'ББИ[-–— ]?26', re.I)
-          day_pat = re.compile(r'понедельник|вторник|среда|четверг|пятница|суббота|воскресенье', re.I)
-          found_any = False
+          headers=[]
+          for c in range(sh.ncols):
+              s=str(sh.cell_value(0,c)).strip()
+              if s.startswith('ББИ-26'):
+                  headers.append((c,s))
+          print('TARGET_GROUPS', headers)
+          if len(headers) != 7:
+              raise RuntimeError(f'Expected 7 ББИ-26 groups, got {len(headers)}')
 
-          for sh in book.sheets():
-              matches = []
-              for rr in range(sh.nrows):
-                  for cc in range(sh.ncols):
-                      v = sh.cell_value(rr, cc)
-                      s = str(v).strip() if v not in ('', None) else ''
-                      if s and pat.search(s):
-                          matches.append((rr, cc, s))
-              if not matches:
-                  continue
-              found_any = True
-              print('\n=== SHEET', sh.name, 'ROWS', sh.nrows, 'COLS', sh.ncols, '===')
-              print('GROUP_MATCHES', matches)
-              cols = sorted({c for _, c, _ in matches})
-              print('RELEVANT_COLS', cols)
+          # Each ББИ group occupies four columns: subgroup 1 subject/room + subgroup 2 subject/room.
+          spans={name: range(c,c+4) for c,name in headers}
+          sat_start=None
+          next_day=None
+          for rr in range(sh.nrows):
+              d=str(sh.cell_value(rr,0)).strip().lower()
+              if 'суббот' in d:
+                  sat_start=rr
+              elif sat_start is not None and rr>sat_start and d:
+                  next_day=rr
+                  break
+          if sat_start is None:
+              raise RuntimeError('Saturday row not found')
+          sat_end=next_day if next_day is not None else sh.nrows
+          print('SATURDAY_RANGE', sat_start, sat_end-1)
 
-              print('\n--- CONTEXT AROUND GROUP HEADERS ---')
-              for rr, cc, label in matches:
-                  print(f'>>> MATCH {label!r} at row={rr} col={cc}')
-                  for r0 in range(max(0, rr-8), min(sh.nrows, rr+18)):
-                      vals=[]
-                      for c0 in range(max(0, cc-4), min(sh.ncols, cc+5)):
-                          val=str(sh.cell_value(r0,c0)).replace('\n',' / ').strip()
-                          if val:
-                              vals.append(f'c{c0}={val}')
-                      if vals:
-                          print(f'r{r0}: ' + ' | '.join(vals))
+          total_nonempty=0
+          for name, cols in spans.items():
+              hits=[]
+              for rr in range(sat_start,sat_end):
+                  for cc in cols:
+                      v=str(sh.cell_value(rr,cc)).strip()
+                      if v:
+                          hits.append((rr,cc,v))
+              print('SATURDAY_GROUP', name, 'NONEMPTY', len(hits), hits)
+              total_nonempty += len(hits)
 
-              print('\n--- RELEVANT GROUP COLUMNS WITH DAY/TIME CONTEXT ---')
-              context_cols = sorted(set(range(min(6, sh.ncols))) | set(cols) | {c-1 for c in cols if c>0} | {c+1 for c in cols if c+1<sh.ncols})
-              for rr in range(sh.nrows):
-                  vals=[]
-                  for cc in context_cols:
-                      val=str(sh.cell_value(rr,cc)).replace('\n',' / ').strip()
-                      if val:
-                          vals.append(f'c{cc}={val}')
-                  if vals:
-                      joined=' | '.join(vals)
-                      if any(pat.search(str(sh.cell_value(rr,c))) for c in cols) or any(str(sh.cell_value(rr,c)).strip() for c in cols) or day_pat.search(joined):
-                          print(f'r{rr}: {joined}')
+          print('SATURDAY_TOTAL_NONEMPTY_BBI26', total_nonempty)
+          print('SATURDAY_ALL_BBI26_EMPTY', total_nonempty == 0)
 
-              print('\n--- SATURDAY WINDOWS ---')
-              sat_rows=[]
-              for rr in range(sh.nrows):
-                  rowtext=' | '.join(str(sh.cell_value(rr,cc)) for cc in range(sh.ncols))
-                  if re.search(r'суббот', rowtext, re.I):
-                      sat_rows.append(rr)
-              print('SATURDAY_ROWS', sat_rows)
-              for sr in sat_rows:
-                  print(f'>>> SATURDAY starting row {sr}')
-                  for rr in range(sr, min(sh.nrows, sr+30)):
-                      vals=[]
-                      for cc in context_cols:
-                          val=str(sh.cell_value(rr,cc)).replace('\n',' / ').strip()
-                          if val:
-                              vals.append(f'c{cc}={val}')
-                      if vals:
-                          print(f'r{rr}: ' + ' | '.join(vals))
-
-          if not found_any:
-              print('NO_BBI26_MATCHES')
-              # Diagnostic: show any cells containing ББИ, to reveal actual 2026 group naming.
-              for sh in book.sheets():
-                  hits=[]
-                  for rr in range(sh.nrows):
-                      for cc in range(sh.ncols):
-                          s=str(sh.cell_value(rr,cc)).strip()
-                          if 'ББИ' in s.upper():
-                              hits.append((rr,cc,s))
-                  if hits:
-                      print('BBI_DIAGNOSTIC', sh.name, hits[:200])
-              sys.exit(2)
+          # Print the exact Saturday matrix for independent visual verification.
+          print('--- SATURDAY_MATRIX c0..c30 ---')
+          for rr in range(sat_start,sat_end):
+              vals=[]
+              for cc in range(0,31):
+                  v=str(sh.cell_value(rr,cc)).replace('\n',' / ').strip()
+                  if v:
+                      vals.append(f'c{cc}={v}')
+              print(f'r{rr}: ' + (' | '.join(vals) if vals else '<EMPTY>'))
           PY
