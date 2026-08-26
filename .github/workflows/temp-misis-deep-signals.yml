@@ -1,0 +1,126 @@
+name: TEMP MISIS deep schedule signals
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract deeper MISIS BBI schedule signals
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -q requests xlrd
+          python - <<'PY'
+          import requests, xlrd, collections, re, statistics
+          URL='https://misis.ru/files/-/a20e90e9422cb6229fc49ee8005324ac/itkn-250826.xls'
+          r=requests.get(URL,timeout=45,headers={'User-Agent':'Mozilla/5.0'}); r.raise_for_status()
+          wb=xlrd.open_workbook(file_contents=r.content)
+          DAYS=['Понедельник','Вторник','Среда','Четверг','Пятница','Суббота']
+          WEEKDAYS=DAYS[:5]
+
+          def classify(text):
+              t=text.lower()
+              if 'лаборатор' in t: return 'lab'
+              if 'практичес' in t: return 'practice'
+              if 'лекцион' in t: return 'lecture'
+              return 'other'
+
+          for course in ['1 курс','2 курс','3 курс','4 курс']:
+              sh=wb.sheet_by_name(course)
+              hs=[]
+              for c in range(sh.ncols):
+                  s=str(sh.cell_value(0,c)).strip()
+                  if s.upper().startswith('ББИ-'): hs.append((c,s))
+              starts=[]
+              for rr in range(sh.nrows):
+                  d=str(sh.cell_value(rr,0)).strip()
+                  if d in DAYS+['Воскресенье']: starts.append((rr,d))
+              dr={d:(rr,starts[i+1][0] if i+1<len(starts) else sh.nrows) for i,(rr,d) in enumerate(starts)}
+              variants=[]; subject_types=collections.Counter(); rooms=collections.Counter(); subjects=collections.Counter()
+              group_variant_summaries=collections.defaultdict(list)
+              for i,(c,g) in enumerate(hs):
+                  nc=hs[i+1][0] if i+1<len(hs) else sh.ncols
+                  width=min(4,max(2,nc-c)); scols=[c]+([c+2] if width>=4 and c+2<nc else [])
+                  for sg_i,sc in enumerate(scols,1):
+                      roomc=sc+1 if sc+1<sh.ncols else None
+                      for off in [0,1]:
+                          daily={}; total=0; heavy=0; late_starts=0; early_starts=0; late_ends=0
+                          for d in DAYS:
+                              a,b=dr[d]; slots=[]
+                              for rr in range(a,b):
+                                  if str(sh.cell_value(rr,1)).strip():
+                                      tr=rr+off
+                                      if tr<b:
+                                          subj=str(sh.cell_value(tr,sc)).strip()
+                                          if subj:
+                                              num=int(float(sh.cell_value(rr,1))); tm=str(sh.cell_value(rr,2)).strip()
+                                              room=str(sh.cell_value(tr,roomc)).strip() if roomc is not None else ''
+                                              slots.append((num,tm,subj,room))
+                                              subject_types[classify(subj)] += 1
+                                              # strip type/teacher tails for coarse unique-subject view
+                                              base=re.split(r'\s*\((?:Лекционные|Практические|Лабораторные)\)',subj,1)[0].strip()
+                                              subjects[base]+=1
+                                              if room: rooms[room]+=1
+                              daily[d]=slots
+                              total += len(slots)
+                              if len(slots)>=4: heavy += 1
+                              if slots:
+                                  st=slots[0][1].split(' - ')[0]
+                                  en=slots[-1][1].split(' - ')[-1]
+                                  if st >= '12:40:00': late_starts += 1
+                                  if st == '09:00:00': early_starts += 1
+                                  if en >= '17:55:00': late_ends += 1
+                          free_weekdays=[d for d in WEEKDAYS if not daily[d]]
+                          active_weekdays=[d for d in WEEKDAYS if daily[d]]
+                          sat=bool(daily['Суббота'])
+                          rec=(g,sg_i,off+1,total,len(active_weekdays),tuple(free_weekdays),sat,heavy,late_starts,early_starts,late_ends)
+                          variants.append(rec); group_variant_summaries[g].append(rec)
+              print('\n===',course,'===')
+              # aggregate free weekdays
+              freecnt=collections.Counter(len(v[5]) for v in variants)
+              freewhich=collections.Counter(d for v in variants for d in v[5])
+              heavycnt=collections.Counter(v[7] for v in variants)
+              lateStartCnt=collections.Counter(v[8] for v in variants)
+              earlyStartCnt=collections.Counter(v[9] for v in variants)
+              lateEndCnt=collections.Counter(v[10] for v in variants)
+              print('FREE_WEEKDAY_COUNT_DIST',dict(sorted(freecnt.items())))
+              print('FREE_WEEKDAY_BY_DAY',dict(freewhich))
+              print('HEAVY_4PLUS_DAYS_DIST',dict(sorted(heavycnt.items())))
+              print('LATE_START_1240PLUS_DAYS_DIST',dict(sorted(lateStartCnt.items())))
+              print('EARLY_0900_DAYS_DIST',dict(sorted(earlyStartCnt.items())))
+              print('LATE_END_1755_DAYS_DIST',dict(sorted(lateEndCnt.items())))
+              # stable vs changing days across week parity within same group/subgroup
+              stable=collections.Counter(); changed=collections.Counter()
+              for g in hs:
+                  pass
+              perkey=collections.defaultdict(dict)
+              for rec in variants:
+                  g,sg,w=rec[0],rec[1],rec[2]
+                  perkey[(g,sg)][w]=rec
+              for (g,sg),mp in perkey.items():
+                  if 1 in mp and 2 in mp:
+                      # compare free-day sets and totals
+                      a,b=mp[1],mp[2]
+                      stable['same_total'] += int(a[3]==b[3])
+                      stable['same_free_weekdays'] += int(a[5]==b[5])
+                      changed['total_pairs_changed'] += int(a[3]!=b[3])
+                      changed['free_weekdays_changed'] += int(a[5]!=b[5])
+              print('WEEK_PARITY_STABILITY',dict(stable),dict(changed),'PAIRS',len(perkey))
+              print('CONTACT_TYPE_COUNTS',dict(subject_types))
+              print('TOP_ROOMS',rooms.most_common(12))
+              print('TOP_SUBJECTS',subjects.most_common(18))
+              for g,recs in group_variant_summaries.items():
+                  print('GROUP_SIGNAL',g,
+                        'weekly_pairs',sorted(set(x[3] for x in recs)),
+                        'free_weekdays',sorted(set(x[5] for x in recs)),
+                        'sat',sum(1 for x in recs if x[6]),'/',len(recs),
+                        'heavy4+',sorted(set(x[7] for x in recs)),
+                        'lateStartDays',sorted(set(x[8] for x in recs)),
+                        'early0900Days',sorted(set(x[9] for x in recs)))
+          PY
