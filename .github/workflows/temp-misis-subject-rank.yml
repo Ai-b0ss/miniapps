@@ -1,0 +1,103 @@
+name: TEMP MISIS subjects and second-year ranking
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rank workability and inspect subjects
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -q requests xlrd
+          python - <<'PY'
+          import requests,xlrd,collections,re,statistics
+          URL='https://misis.ru/files/-/a20e90e9422cb6229fc49ee8005324ac/itkn-250826.xls'
+          r=requests.get(URL,timeout=45,headers={'User-Agent':'Mozilla/5.0'});r.raise_for_status();wb=xlrd.open_workbook(file_contents=r.content)
+          DAYS=['Понедельник','Вторник','Среда','Четверг','Пятница','Суббота']; WD=DAYS[:5]
+          def clean(s):
+              s=re.sub(r'^\s*(?:1|2|1, 2|1, 2, 3)\s*п\.г\.\s*','',s).strip()
+              s=re.split(r'\s*\((?:Лекционные|Практические|Лабораторные)\)',s,1)[0].strip()
+              return s
+          def typ(s):
+              t=s.lower()
+              if 'лаборатор' in t:return 'lab'
+              if 'практичес' in t:return 'practice'
+              if 'лекцион' in t:return 'lecture'
+              return 'other'
+          def professional(subj,course):
+              t=subj.lower()
+              general=['математика','история россии','основы российской государственности','иностранный язык','физическая культура','философия']
+              return not any(x in t for x in general)
+          def mins(t):h,m,*_=map(int,t.split(':'));return h*60+m
+          def wh(sl):
+              if not sl:return 9.0
+              st=mins(sl[0][1].split(' - ')[0]);en=mins(sl[-1][1].split(' - ')[-1]); chunks=[max(0,st-540),max(0,1080-en)]
+              return round(sum(x for x in chunks if x>=120)/60,2)
+
+          for course in ['1 курс','2 курс','3 курс','4 курс']:
+              sh=wb.sheet_by_name(course); hs=[]
+              for c in range(sh.ncols):
+                  s=str(sh.cell_value(0,c)).strip()
+                  if s.upper().startswith('ББИ-'):hs.append((c,s))
+              starts=[]
+              for rr in range(sh.nrows):
+                  d=str(sh.cell_value(rr,0)).strip()
+                  if d in DAYS+['Воскресенье']:starts.append((rr,d))
+              dr={d:(rr,starts[i+1][0] if i+1<len(starts) else sh.nrows) for i,(rr,d) in enumerate(starts)}
+              subjects=collections.defaultdict(lambda:collections.Counter()); profslots=0; genslots=0; teachers=collections.Counter()
+              groupvars=collections.defaultdict(list)
+              for i,(c,g) in enumerate(hs):
+                  nc=hs[i+1][0] if i+1<len(hs) else sh.ncols; width=min(4,max(2,nc-c)); scols=[c]+([c+2] if width>=4 and c+2<nc else [])
+                  for sg,sc in enumerate(scols,1):
+                      for off in [0,1]:
+                          totalwh=0; free=[]; pairs=0; dailySig=[]
+                          for d in DAYS:
+                              a,b=dr[d]; slots=[]
+                              for rr in range(a,b):
+                                  if str(sh.cell_value(rr,1)).strip():
+                                      tr=rr+off
+                                      if tr<b:
+                                          raw=str(sh.cell_value(tr,sc)).strip()
+                                          if raw:
+                                              tm=str(sh.cell_value(rr,2)).strip(); slots.append((int(float(sh.cell_value(rr,1))),tm,raw))
+                                              sub=clean(raw); subjects[sub][typ(raw)]+=1
+                                              if professional(sub,course):profslots+=1
+                                              else:genslots+=1
+                                              # teacher after slash if present
+                                              if '/' in raw:
+                                                  tea=raw.rsplit('/',1)[-1].strip(); teachers[tea]+=1
+                              pairs+=len(slots)
+                              if d in WD:
+                                  totalwh+=wh(slots)
+                                  if not slots:free.append(d)
+                                  dailySig.append((d,len(slots),slots[0][1].split(' - ')[0] if slots else 'FREE',slots[-1][1].split(' - ')[-1] if slots else 'FREE'))
+                          groupvars[g].append((sg,off+1,pairs,round(totalwh,2),tuple(free),tuple(dailySig)))
+              print('\n===SUBJECTS',course,'===')
+              print('PROF_GENERAL_SLOT_RATIO',profslots,genslots,round(profslots/(profslots+genslots),3) if profslots+genslots else 0)
+              for s,tc in sorted(subjects.items()): print('SUBJECT',s,dict(tc),'TOTAL',sum(tc.values()),'PROF',professional(s,course))
+              print('TEACHERS_UNIQUE',len(teachers),'TOP',teachers.most_common(15))
+              if course=='2 курс':
+                  ranked=[]
+                  for g,recs in groupvars.items():
+                      mins_wh=min(x[3] for x in recs); avg=statistics.mean(x[3] for x in recs); maxwh=max(x[3] for x in recs)
+                      free_sets=[x[4] for x in recs]
+                      guaranteed=set(WD)
+                      for fs in free_sets: guaranteed &= set(fs)
+                      volatility=maxwh-mins_wh
+                      # score prioritizes guaranteed office-window hours and stable full free weekdays, penalizes volatility
+                      score=mins_wh + 5*len(guaranteed) - 0.25*volatility
+                      ranked.append((score,g,mins_wh,round(avg,2),maxwh,tuple(sorted(guaranteed)),round(volatility,2)))
+                  for rank,x in enumerate(sorted(ranked,reverse=True),1): print('RANK2',rank,x)
+                  # Exact two-week signatures per group, collapse identical subgroups
+                  for g,recs in groupvars.items():
+                      sigs=collections.Counter((x[1],x[2],x[3],x[4],x[5]) for x in recs)
+                      print('GROUP2_SIG',g,'unique',len(sigs))
+                      for sig,n in sorted(sigs.items()): print(' SIGx',n,sig)
+          PY
