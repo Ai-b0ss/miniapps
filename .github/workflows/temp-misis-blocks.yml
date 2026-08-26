@@ -1,0 +1,61 @@
+name: TEMP MISIS block distributions
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract daily blocks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -q requests xlrd
+          python - <<'PY'
+          import requests, xlrd, collections
+          URL='https://misis.ru/files/-/a20e90e9422cb6229fc49ee8005324ac/itkn-250826.xls'
+          r=requests.get(URL,timeout=45,headers={'User-Agent':'Mozilla/5.0'}); r.raise_for_status()
+          wb=xlrd.open_workbook(file_contents=r.content)
+          DAYS=['Понедельник','Вторник','Среда','Четверг','Пятница','Суббота']
+          for course in ['1 курс','2 курс','3 курс','4 курс']:
+              sh=wb.sheet_by_name(course)
+              hs=[]
+              for c in range(sh.ncols):
+                  s=str(sh.cell_value(0,c)).strip()
+                  if s.upper().startswith('ББИ-'): hs.append((c,s))
+              starts=[]
+              for rr in range(sh.nrows):
+                  d=str(sh.cell_value(rr,0)).strip()
+                  if d in DAYS+['Воскресенье']: starts.append((rr,d))
+              dr={d:(rr,starts[i+1][0] if i+1<len(starts) else sh.nrows) for i,(rr,d) in enumerate(starts)}
+              variants=[]
+              for i,(c,g) in enumerate(hs):
+                  nc=hs[i+1][0] if i+1<len(hs) else sh.ncols
+                  width=min(4,max(2,nc-c)); scols=[c]+([c+2] if width>=4 and c+2<nc else [])
+                  for sc in scols:
+                      for off in [0,1]:
+                          rec={}
+                          for d in DAYS:
+                              a,b=dr[d]; slots=[]
+                              for rr in range(a,b):
+                                  if str(sh.cell_value(rr,1)).strip():
+                                      tr=rr+off
+                                      if tr<b and str(sh.cell_value(tr,sc)).strip():
+                                          num=int(float(sh.cell_value(rr,1)))
+                                          tm=str(sh.cell_value(rr,2)).strip()
+                                          slots.append((num,tm))
+                              if slots:
+                                  rec[d]=(len(slots),slots[0][1].split(' - ')[0],slots[-1][1].split(' - ')[-1])
+                              else: rec[d]=(0,'FREE','FREE')
+                          variants.append(rec)
+              print('\nCOURSE',course,'VARIANTS',len(variants))
+              for d in DAYS:
+                  cnt=collections.Counter(v[d] for v in variants)
+                  ordered=sorted(cnt.items(),key=lambda x:(-x[1],x[0]))
+                  print('BLOCKS',d,'; '.join(f'{k[0]}p {k[1]}-{k[2]} x{n}' for k,n in ordered))
+          PY
