@@ -1,0 +1,60 @@
+name: hf-source-snapshot
+
+on:
+  push:
+    branches:
+      - tmp/hf-portfolio-inspect-20260830
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    if: ${{ !contains(github.event.head_commit.message, '[snapshot]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: tmp/hf-portfolio-inspect-20260830
+      - name: Fetch public HF source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf hf_snapshot_public
+          mkdir -p hf_snapshot_public/repo
+          curl --max-time 25 --retry 2 -fsSL -A 'Mozilla/5.0' 'https://huggingface.co/api/spaces/i99er/igor-portfolio' -o hf_snapshot_public/meta.json
+          curl --max-time 25 --retry 2 -fsSL -A 'Mozilla/5.0' 'https://huggingface.co/api/spaces/i99er/igor-portfolio/tree/main?recursive=true&expand=false' -o hf_snapshot_public/tree.json
+          python - <<'PY'
+          import json, urllib.parse, urllib.request, pathlib
+          root=pathlib.Path('hf_snapshot_public/repo')
+          t=json.load(open('hf_snapshot_public/tree.json',encoding='utf-8'))
+          items=t if isinstance(t,list) else t.get('items',[])
+          allow={'.html','.css','.js','.mjs','.cjs','.ts','.tsx','.jsx','.json','.md','.txt','.py','.yml','.yaml'}
+          report=[]
+          for x in items:
+              p=x.get('path') or ''
+              if x.get('type')!='file' or pathlib.Path(p).suffix.lower() not in allow or (x.get('size') or 0)>1500000: continue
+              url='https://huggingface.co/spaces/i99er/igor-portfolio/resolve/main/'+urllib.parse.quote(p,safe='/')+'?download=true'
+              try:
+                  req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'})
+                  data=urllib.request.urlopen(req,timeout=25).read()
+                  dest=root/p; dest.parent.mkdir(parents=True,exist_ok=True); dest.write_bytes(data)
+                  report.append({'path':p,'bytes':len(data),'ok':True})
+              except Exception as e: report.append({'path':p,'ok':False,'error':str(e)[:300]})
+          pathlib.Path('hf_snapshot_public/fetch-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+          PY
+          for u in 'https://i99er-igor-portfolio.hf.space/' 'https://huggingface.co/spaces/i99er/igor-portfolio'; do
+            name=$(echo "$u" | sed 's#https://##; s#[^A-Za-z0-9]#_#g')
+            curl --max-time 25 -L -A 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 Version/18.0 Mobile/15E148 Safari/604.1' -sS -D "hf_snapshot_public/${name}.headers" "$u" -o "hf_snapshot_public/${name}.html" || true
+          done
+      - name: Commit snapshot to temporary branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'HF portfolio inspector'
+          git config user.email 'actions@github.com'
+          git add hf_snapshot_public
+          git diff --cached --quiet && exit 0
+          git commit -m 'TEMP: HF public snapshot [snapshot]'
+          git push origin HEAD:tmp/hf-portfolio-inspect-20260830
