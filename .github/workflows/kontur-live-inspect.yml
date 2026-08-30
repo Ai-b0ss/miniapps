@@ -1,0 +1,100 @@
+name: kontur-live-inspect
+
+on:
+  push:
+    branches: [tmp/kontur-live-inspect-20260830]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch live Cloudflare production
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/assets
+          BASE='https://kontur-igor.igorekglukhovskii43.workers.dev'
+          curl --retry 3 --retry-delay 2 --max-time 40 -fsSL -D out/root.headers "$BASE/" -o out/index.html
+          echo 'ROOT_HEADERS_BEGIN'
+          sed -n '1,80p' out/root.headers
+          echo 'ROOT_HEADERS_END'
+          python - <<'PY'
+          import pathlib,re,json,urllib.parse,urllib.request
+          base='https://kontur-igor.igorekglukhovskii43.workers.dev'
+          root=pathlib.Path('out')
+          html=(root/'index.html').read_text(encoding='utf-8',errors='replace')
+          refs=set(re.findall(r'(?:src|href)=["\']([^"\']+)["\']',html,re.I))
+          report=[]
+          def fetch(ref):
+              url=urllib.parse.urljoin(base+'/',ref)
+              name=urllib.parse.urlparse(url).path.lstrip('/') or 'root'
+              dest=root/name
+              dest.parent.mkdir(parents=True,exist_ok=True)
+              req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'})
+              try:
+                  with urllib.request.urlopen(req,timeout=40) as r:
+                      data=r.read(); ct=r.headers.get('content-type','')
+                  dest.write_bytes(data)
+                  report.append({'ref':ref,'url':url,'path':str(dest),'bytes':len(data),'content_type':ct,'ok':True})
+                  return data,ct
+              except Exception as e:
+                  report.append({'ref':ref,'url':url,'ok':False,'error':str(e)[:300]}); return b'', ''
+          bundles=[]
+          for ref in sorted(refs):
+              data,ct=fetch(ref)
+              if ref.split('?')[0].endswith(('.js','.css')) and data: bundles.append((ref,data.decode('utf-8','replace')))
+          asset_refs=set()
+          patterns=[r'["\']([^"\']+\.(?:webp|png|jpe?g|svg|avif|gif))(?:\?[^"\']*)?["\']',r'url\(([^)]+\.(?:webp|png|jpe?g|svg|avif|gif)[^)]*)\)']
+          for ref,text in bundles:
+              for pat in patterns:
+                  for m in re.finditer(pat,text,re.I):
+                      x=m.group(1).strip('"\' ')
+                      if x.startswith('data:'): continue
+                      asset_refs.add(x)
+          for ref in sorted(asset_refs): fetch(ref)
+          (root/'fetch-report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+          (root/'asset-refs.txt').write_text('\n'.join(sorted(asset_refs)),encoding='utf-8')
+          print('HTML_REFS',sorted(refs))
+          print('IMAGE_REFS_COUNT',len(asset_refs))
+          for x in sorted(asset_refs): print('IMGREF',x)
+          PY
+          echo 'FILES_BEGIN'
+          find out -type f -maxdepth 6 -print0 | xargs -0 file | head -n 500
+          echo 'FILES_END'
+      - name: Install browser
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm i --no-audit --no-fund playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+      - name: Capture live screenshots and network
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > out/capture.mjs <<'JS'
+          import {chromium} from 'playwright'; import fs from 'node:fs';
+          const url='https://kontur-igor.igorekglukhovskii43.workers.dev/';
+          const cases=[['mobile',390,844,true],['desktop',1440,1100,false]]; const report=[];
+          for(const [name,w,h,mobile] of cases){
+            const b=await chromium.launch({headless:true}); const c=await b.newContext({viewport:{width:w,height:h},isMobile:mobile,hasTouch:mobile,locale:'ru-RU'}); const p=await c.newPage();
+            const responses=[],failed=[],errors=[];
+            p.on('response',r=>{const u=r.url(); if(/\.(webp|png|jpe?g|svg|avif)(\?|$)/i.test(u)||u.includes('/assets/')) responses.push({url:u,status:r.status(),ct:r.headers()['content-type']||''});});
+            p.on('requestfailed',r=>failed.push({url:r.url(),error:r.failure()?.errorText||''})); p.on('pageerror',e=>errors.push(String(e)));
+            let status=null,err=null; try{const r=await p.goto(url,{waitUntil:'networkidle',timeout:60000});status=r?.status()??null;}catch(e){err=String(e)} await p.waitForTimeout(2500);
+            await p.screenshot({path:`out/${name}.png`,fullPage:true});
+            const metrics=await p.evaluate(()=>({title:document.title,text:(document.body?.innerText||'').slice(0,5000),iw:innerWidth,sw:Math.max(document.documentElement.scrollWidth,document.body?.scrollWidth||0),sh:Math.max(document.documentElement.scrollHeight,document.body?.scrollHeight||0),imgs:[...document.images].map(i=>({src:i.currentSrc||i.src,w:i.naturalWidth,h:i.naturalHeight,complete:i.complete,alt:i.alt}))}));
+            report.push({name,status,err,metrics,responses,failed,errors}); console.log('CAPTURE',JSON.stringify(report.at(-1)));
+            await c.close();await b.close();
+          }
+          fs.writeFileSync('out/browser-report.json',JSON.stringify(report,null,2));
+          JS
+          node out/capture.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kontur-live-production-inspection
+          path: out
+          retention-days: 1
