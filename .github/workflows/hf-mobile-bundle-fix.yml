@@ -1,0 +1,125 @@
+name: hf-mobile-bundle-fix
+
+on:
+  push:
+    branches: [tmp/hf-portfolio-inspect-20260830]
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build exact self-contained portfolio
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fixed
+          python - <<'PY'
+          import base64, json, mimetypes, pathlib, re, urllib.request
+          root=pathlib.Path('hf_snapshot_public/repo')
+          html=(root/'index.html').read_text(encoding='utf-8')
+          css=(root/'assets/styles.css').read_text(encoding='utf-8')
+          js=(root/'assets/app.js').read_text(encoding='utf-8')
+          host='https://i99er-igor-portfolio.static.hf.space/'
+          # Inline CSS and JS first. Keep the exact source order and behavior.
+          html=re.sub(r'<link[^>]+href=["\']assets/styles\.css["\'][^>]*>', '<style id="portfolio-bundled-css">'+css.replace('</style>','<\\/style>')+'</style>', html, count=1, flags=re.I)
+          html=re.sub(r'<script[^>]+src=["\']assets/app\.js["\'][^>]*>\s*</script>', '<script id="portfolio-bundled-js">'+js.replace('</script>','<\\/script>')+'</script>', html, count=1, flags=re.I)
+          paths=set(re.findall(r'(?:src|href)=["\'](assets/[^"\']+)["\']',html,flags=re.I))
+          # CSS url(...) local refs too, if any.
+          paths.update(re.findall(r'url\(["\']?(assets/[^)"\']+)',html,flags=re.I))
+          fetched={}
+          for p in sorted(paths):
+              # styles/app are already inlined; avoid replacing their former references if regex found stale fragments.
+              if p in ('assets/styles.css','assets/app.js'): continue
+              url=host+p
+              req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'})
+              with urllib.request.urlopen(req,timeout=35) as r: data=r.read()
+              mime=mimetypes.guess_type(p)[0] or 'application/octet-stream'
+              if p.endswith('.svg'): mime='image/svg+xml'
+              uri=f'data:{mime};base64,'+base64.b64encode(data).decode('ascii')
+              fetched[p]={'bytes':len(data),'mime':mime}
+              html=html.replace('"'+p+'"','"'+uri+'"').replace("'"+p+"'","'"+uri+"'")
+          # Mobile reliability patch: on phone-sized viewports disable GPU-heavy decorative displacement and
+          # avoid a smooth-scroll delay when the browser restores anchors/history. Keep desktop unchanged.
+          patch='''<style id="mobile-reliability-fix">
+          @media (max-width:800px){
+            html{scroll-behavior:auto!important}
+            .hero-art,.parallax-layer,.motion-image,.motion-plate img,.wow-spread>img{will-change:auto!important}
+            .hero-art{inset:0 -10% 0 10%!important;opacity:.78!important}
+            .hero-art img{object-position:58% center!important}
+            .hero-particles{display:none!important}
+          }
+          @media (max-width:390px){.hero-art{inset:0 -8% 0 8%!important}.hero-art img{object-position:56% center!important}}
+          </style>'''
+          html=html.replace('</head>',patch+'</head>',1)
+          # Provenance marker, invisible.
+          html=html.replace('</body>','<!-- mobile-fixed: source sha e54cc952bd515e97fc4d044bcd8f93eea4443610; bundled 2026-08-30 -->\n</body>',1)
+          pathlib.Path('fixed/index.html').write_text(html,encoding='utf-8')
+          pathlib.Path('fixed/README.txt').write_text(
+              'HF mobile-fixed self-contained build\nSource: i99er/igor-portfolio @ e54cc952bd515e97fc4d044bcd8f93eea4443610\n'
+              'All local CSS, JS and image assets are embedded into index.html to remove fragile asset subrequests inside the Hugging Face iframe.\n'
+              'Mobile-only patch disables decorative particle canvas and displacement/GPU hints; desktop layout is unchanged.\n',encoding='utf-8')
+          pathlib.Path('fixed/bundle-report.json').write_text(json.dumps({'source_sha':'e54cc952bd515e97fc4d044bcd8f93eea4443610','embedded':fetched,'html_bytes':len(html.encode())},ensure_ascii=False,indent=2),encoding='utf-8')
+          print('BUNDLE',len(html.encode()),'bytes; embedded',len(fetched),'assets',sum(x['bytes'] for x in fetched.values()),'source bytes')
+          PY
+          grep -q 'mobile-fixed: source sha e54cc952' fixed/index.html
+          if grep -Eq '(src|href)=["'"']assets/' fixed/index.html; then echo 'LOCAL_ASSET_REF_REMAINS'; grep -Eo '(src|href)=["'"']assets/[^"'"']+' fixed/index.html | head; exit 1; fi
+          sha256sum fixed/index.html > fixed/SHA256SUMS.txt
+      - name: Inspect exact HF headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --max-time 30 -sSIL 'https://i99er-igor-portfolio.static.hf.space/' | tee fixed/live-headers.txt
+      - name: Install browsers
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm i --no-audit --no-fund playwright@1.55.0 >/dev/null
+          npx playwright install --with-deps chromium webkit >/dev/null
+      - name: Local negative and visual tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd fixed && python3 -m http.server 8765 >/tmp/fixed-server.log 2>&1 & echo $! >/tmp/fixed-server.pid)
+          sleep 1
+          cat > fixed/test.mjs <<'JS'
+          import {chromium,webkit} from 'playwright'; import fs from 'node:fs';
+          const tests=[['webkit-320',webkit,320,568],['webkit-390',webkit,390,844],['webkit-430',webkit,430,932],['chromium-390',chromium,390,844],['chromium-1440',chromium,1440,1100]];
+          let failed=false; const report=[];
+          for(const [name,engine,w,h] of tests){
+            const b=await engine.launch({headless:true}); const c=await b.newContext({viewport:{width:w,height:h},isMobile:w<600,hasTouch:w<600,deviceScaleFactor:1}); const p=await c.newPage();
+            const errors=[],fails=[],requests=[]; p.on('pageerror',e=>errors.push(String(e)));p.on('requestfailed',r=>fails.push(r.url()));p.on('request',r=>requests.push(r.url()));
+            const r=await p.goto('http://127.0.0.1:8765/index.html',{waitUntil:'networkidle',timeout:45000}); await p.waitForTimeout(1200);
+            await p.evaluate(()=>document.documentElement.style.scrollBehavior='auto');
+            const before=await p.evaluate(()=>({iw:innerWidth,sw:Math.max(document.documentElement.scrollWidth,document.body.scrollWidth),sh:document.documentElement.scrollHeight,imgs:[...document.images].map(i=>({ok:i.complete&&i.naturalWidth>0,n:i.naturalWidth,src:i.currentSrc.slice(0,30)})),canvas:getComputedStyle(document.querySelector('.hero-particles')).display}));
+            const points=[0,.25,.5,.75,.98];const scroll=[];for(const f of points){const target=Math.floor((before.sh-h)*f);await p.evaluate(y=>scrollTo(0,y),target);await p.waitForTimeout(25);scroll.push(await p.evaluate(()=>Math.round(scrollY)));}
+            const outside=await p.evaluate(()=>[...document.querySelectorAll('*')].filter(el=>{const s=getComputedStyle(el),r=el.getBoundingClientRect();if(s.display==='none'||r.width===0||r.height===0)return false;if(s.position==='absolute'&&['hero-art','wow-orbit','wow-beam'].some(k=>el.classList.contains(k)))return false;return r.left<-4||r.right>innerWidth+4}).slice(0,20).map(el=>({tag:el.tagName,cls:el.className,left:el.getBoundingClientRect().left,right:el.getBoundingClientRect().right})));
+            await p.screenshot({path:`fixed/${name}.png`,fullPage:false});
+            const localAssetRequests=requests.filter(u=>/\/assets\//.test(u)); const imgBad=before.imgs.filter(i=>!i.ok);
+            const ok=r.status()===200&&before.sw===before.iw&&!errors.length&&!fails.length&&!localAssetRequests.length&&!imgBad.length&&!outside.length&&scroll.every((v,i)=>i===0||v>scroll[i-1])&&(w>800||before.canvas==='none');
+            report.push({name,ok,status:r.status(),before,scroll,errors,fails,localAssetRequests,outside}); if(!ok)failed=true;console.log('CHECK',JSON.stringify(report.at(-1)));
+            await c.close();await b.close();
+          }
+          fs.writeFileSync('fixed/verification.json',JSON.stringify(report,null,2)); if(failed)process.exit(1);
+          JS
+          node fixed/test.mjs
+          kill $(cat /tmp/fixed-server.pid) || true
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f fixed/test.mjs fixed/*.png fixed/bundle-report.json fixed/live-headers.txt fixed/verification.json
+          (cd fixed && zip -9 -q ../igor-portfolio-mobile-fixed.zip index.html README.txt SHA256SUMS.txt)
+          sha256sum igor-portfolio-mobile-fixed.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: igor-portfolio-mobile-fixed
+          path: |
+            fixed/index.html
+            fixed/README.txt
+            fixed/SHA256SUMS.txt
+            igor-portfolio-mobile-fixed.zip
+          retention-days: 1
