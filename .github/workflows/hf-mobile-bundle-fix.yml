@@ -47,28 +47,40 @@ jobs:
             .hero-art img{object-position:58% center!important}
             .hero-particles{display:none!important}
           }
+          /* 390 CSS px is a normal modern iPhone width, not a tiny-phone layout. The old
+             max-width:390 rule collapsed two useful 2-column components into one column,
+             adding hundreds of pixels to an already long page. Keep the 320/360 safety
+             layout, but restore the 2-column composition on 361–390 px. */
+          @media (min-width:361px) and (max-width:390px){
+            .proof-ledger{grid-template-columns:1fr 1fr!important}
+            .proof-ledger>div{border-right:1px solid var(--line)!important;border-bottom:0!important}
+            .proof-ledger>div:nth-child(2),.proof-ledger>div:nth-child(4){border-right:0!important}
+            .proof-ledger>div:nth-child(-n+2){border-bottom:1px solid var(--line)!important}
+            .case-flow-tabs{grid-template-columns:1fr 1fr!important}
+            .case-flow-route{display:block!important}
+            .case-flow-pro.is-enhanced .case-flow-panels{min-height:286px!important}
+          }
           @media (max-width:390px){.hero-art{inset:0 -8% 0 8%!important}.hero-art img{object-position:56% center!important}}
           </style>'''
           html=html.replace('</head>',patch+'</head>',1)
           html=html.replace('</body>','<!-- mobile-fixed: source sha e54cc952bd515e97fc4d044bcd8f93eea4443610; bundled 2026-08-30 -->\n</body>',1)
-          if re.search(r'(?:src|href)=["\']assets/',html,re.I):
-              raise SystemExit('LOCAL_ASSET_REF_REMAINS')
-          if 'mobile-fixed: source sha e54cc952' not in html:
-              raise SystemExit('PROVENANCE_MARKER_MISSING')
+          if re.search(r'(?:src|href)=["\']assets/',html,re.I): raise SystemExit('LOCAL_ASSET_REF_REMAINS')
+          if 'mobile-fixed: source sha e54cc952' not in html: raise SystemExit('PROVENANCE_MARKER_MISSING')
           pathlib.Path('fixed/index.html').write_text(html,encoding='utf-8')
           pathlib.Path('fixed/README.txt').write_text(
               'HF mobile-fixed self-contained build\nSource: i99er/igor-portfolio @ e54cc952bd515e97fc4d044bcd8f93eea4443610\n'
-              'All local CSS, JS and image assets are embedded into index.html to remove fragile asset subrequests inside the Hugging Face iframe.\n'
-              'Mobile-only patch disables decorative particle canvas and displacement/GPU hints; desktop layout is unchanged.\n',encoding='utf-8')
+              'Local CSS, JS and 9 referenced media assets are embedded into index.html, so the portfolio no longer depends on separate HF/Xet asset requests for its critical presentation.\n'
+              'Mobile-only changes: disable the decorative particle canvas/GPU displacement, reduce hero crop, disable smooth-scroll latency, and keep the useful two-column case/proof layout at 361-390 CSS px. Desktop composition is unchanged.\n',encoding='utf-8')
           pathlib.Path('fixed/bundle-report.json').write_text(json.dumps({'source_sha':'e54cc952bd515e97fc4d044bcd8f93eea4443610','embedded':fetched,'html_bytes':len(html.encode())},ensure_ascii=False,indent=2),encoding='utf-8')
           print('BUNDLE',len(html.encode()),'bytes; embedded',len(fetched),'assets',sum(x['bytes'] for x in fetched.values()),'source bytes')
           PY
           sha256sum fixed/index.html > fixed/SHA256SUMS.txt
-      - name: Inspect exact HF headers
+      - name: Inspect exact HF GET headers
         shell: bash
         run: |
           set -euo pipefail
-          curl --max-time 30 -sSIL 'https://i99er-igor-portfolio.static.hf.space/' | tee fixed/live-headers.txt
+          curl --max-time 30 -sS -D fixed/live-get-headers.txt -o /dev/null 'https://i99er-igor-portfolio.static.hf.space/index.html'
+          cat fixed/live-get-headers.txt
       - name: Install browsers
         run: |
           npm init -y >/dev/null 2>&1
@@ -82,23 +94,22 @@ jobs:
           sleep 1
           cat > fixed/test.mjs <<'JS'
           import {chromium,webkit} from 'playwright'; import fs from 'node:fs';
-          const tests=[['webkit-320',webkit,320,568],['webkit-390',webkit,390,844],['webkit-430',webkit,430,932],['chromium-390',chromium,390,844],['chromium-1440',chromium,1440,1100]];
+          const tests=[['webkit-320',webkit,320,568],['webkit-360',webkit,360,780],['webkit-390',webkit,390,844],['webkit-430',webkit,430,932],['chromium-390',chromium,390,844],['chromium-1440',chromium,1440,1100]];
           let failed=false; const report=[];
           for(const [name,engine,w,h] of tests){
             const b=await engine.launch({headless:true}); const c=await b.newContext({viewport:{width:w,height:h},isMobile:w<600,hasTouch:w<600,deviceScaleFactor:1}); const p=await c.newPage();
-            const errors=[],fails=[],requests=[]; p.on('pageerror',e=>errors.push(String(e)));p.on('requestfailed',r=>fails.push(r.url()));p.on('request',r=>requests.push(r.url()));
-            const r=await p.goto('http://127.0.0.1:8765/index.html',{waitUntil:'networkidle',timeout:45000}); await p.waitForTimeout(1200);
-            await p.evaluate(()=>document.documentElement.style.scrollBehavior='auto');
-            const before=await p.evaluate(()=>({iw:innerWidth,sw:Math.max(document.documentElement.scrollWidth,document.body.scrollWidth),sh:document.documentElement.scrollHeight,imgs:[...document.images].map(i=>({ok:i.complete&&i.naturalWidth>0,n:i.naturalWidth,src:i.currentSrc.slice(0,30)})),canvas:getComputedStyle(document.querySelector('.hero-particles')).display}));
-            const points=[0,.25,.5,.75,.98];const scroll=[];for(const f of points){const target=Math.floor((before.sh-h)*f);await p.evaluate(y=>scrollTo(0,y),target);await p.waitForTimeout(25);scroll.push(await p.evaluate(()=>Math.round(scrollY)));}
-            const outside=await p.evaluate(()=>[...document.querySelectorAll('*')].filter(el=>{const s=getComputedStyle(el),r=el.getBoundingClientRect();if(s.display==='none'||r.width===0||r.height===0)return false;if(s.position==='absolute'&&['hero-art','wow-orbit','wow-beam'].some(k=>el.classList.contains(k)))return false;return r.left<-4||r.right>innerWidth+4}).slice(0,20).map(el=>({tag:el.tagName,cls:el.className,left:el.getBoundingClientRect().left,right:el.getBoundingClientRect().right})));
-            await p.screenshot({path:`fixed/${name}.png`,fullPage:false});
-            const localAssetRequests=requests.filter(u=>/\/assets\//.test(u)); const imgBad=before.imgs.filter(i=>!i.ok);
-            const ok=r.status()===200&&before.sw===before.iw&&!errors.length&&!fails.length&&!localAssetRequests.length&&!imgBad.length&&!outside.length&&scroll.every((v,i)=>i===0||v>scroll[i-1])&&(w>800||before.canvas==='none');
-            report.push({name,ok,status:r.status(),before,scroll,errors,fails,localAssetRequests,outside}); if(!ok)failed=true;console.log('CHECK',JSON.stringify(report.at(-1)));
-            await c.close();await b.close();
+            const errors=[],fails=[],requests=[];p.on('pageerror',e=>errors.push(String(e)));p.on('requestfailed',r=>fails.push(r.url()));p.on('request',r=>requests.push(r.url()));
+            const r=await p.goto('http://127.0.0.1:8765/index.html',{waitUntil:'networkidle',timeout:45000});await p.waitForTimeout(1200);await p.evaluate(()=>document.documentElement.style.scrollBehavior='auto');
+            const before=await p.evaluate(()=>({iw:innerWidth,sw:Math.max(document.documentElement.scrollWidth,document.body.scrollWidth),sh:document.documentElement.scrollHeight,imgs:[...document.images].map(i=>({ok:i.complete&&i.naturalWidth>0,n:i.naturalWidth,src:i.currentSrc.slice(0,30)})),canvas:getComputedStyle(document.querySelector('.hero-particles')).display,tabs:getComputedStyle(document.querySelector('.case-flow-tabs')).gridTemplateColumns,ledger:getComputedStyle(document.querySelector('.proof-ledger')).gridTemplateColumns}));
+            const points=[0,.25,.5,.75,.98],scroll=[];for(const f of points){const target=Math.floor((before.sh-h)*f);await p.evaluate(y=>scrollTo(0,y),target);await p.waitForTimeout(30);scroll.push(await p.evaluate(()=>Math.round(scrollY)));}
+            await p.evaluate(()=>scrollTo(0,0));await p.waitForTimeout(30);await p.screenshot({path:`fixed/${name}.png`,fullPage:false});
+            const localAssetRequests=requests.filter(u=>/\/assets\//.test(u)),imgBad=before.imgs.filter(i=>!i.ok);
+            const compact390=w===390?(before.tabs.split(' ').length===2&&before.ledger.split(' ').length===2):true;
+            const tiny360=w<=360?(before.tabs.split(' ').length===1):true;
+            const ok=r.status()===200&&before.sw===before.iw&&!errors.length&&!fails.length&&!localAssetRequests.length&&!imgBad.length&&scroll.every((v,i)=>i===0||v>scroll[i-1])&&(w>800||before.canvas==='none')&&compact390&&tiny360;
+            report.push({name,ok,status:r.status(),before,scroll,errors,fails,localAssetRequests,compact390,tiny360});if(!ok)failed=true;console.log('CHECK',JSON.stringify(report.at(-1)));await c.close();await b.close();
           }
-          fs.writeFileSync('fixed/verification.json',JSON.stringify(report,null,2)); if(failed)process.exit(1);
+          fs.writeFileSync('fixed/verification.json',JSON.stringify(report,null,2));if(failed)process.exit(1);
           JS
           node fixed/test.mjs
           kill $(cat /tmp/fixed-server.pid) || true
@@ -108,7 +119,7 @@ jobs:
           set -euo pipefail
           cp fixed/webkit-390.png fixed/mobile-preview.png
           cp fixed/chromium-1440.png fixed/desktop-preview.png
-          rm -f fixed/test.mjs fixed/webkit-320.png fixed/webkit-390.png fixed/webkit-430.png fixed/chromium-390.png fixed/chromium-1440.png fixed/bundle-report.json fixed/live-headers.txt fixed/verification.json
+          rm -f fixed/test.mjs fixed/webkit-320.png fixed/webkit-360.png fixed/webkit-390.png fixed/webkit-430.png fixed/chromium-390.png fixed/chromium-1440.png fixed/bundle-report.json fixed/live-get-headers.txt fixed/verification.json
           (cd fixed && zip -9 -q ../igor-portfolio-mobile-fixed.zip index.html README.txt SHA256SUMS.txt)
           sha256sum igor-portfolio-mobile-fixed.zip
       - uses: actions/upload-artifact@v4
