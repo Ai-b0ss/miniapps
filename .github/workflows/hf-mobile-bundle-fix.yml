@@ -25,26 +25,20 @@ jobs:
           css=(root/'assets/styles.css').read_text(encoding='utf-8')
           js=(root/'assets/app.js').read_text(encoding='utf-8')
           host='https://i99er-igor-portfolio.static.hf.space/'
-          # Inline CSS and JS first. Keep the exact source order and behavior.
           html=re.sub(r'<link[^>]+href=["\']assets/styles\.css["\'][^>]*>', '<style id="portfolio-bundled-css">'+css.replace('</style>','<\\/style>')+'</style>', html, count=1, flags=re.I)
           html=re.sub(r'<script[^>]+src=["\']assets/app\.js["\'][^>]*>\s*</script>', '<script id="portfolio-bundled-js">'+js.replace('</script>','<\\/script>')+'</script>', html, count=1, flags=re.I)
           paths=set(re.findall(r'(?:src|href)=["\'](assets/[^"\']+)["\']',html,flags=re.I))
-          # CSS url(...) local refs too, if any.
           paths.update(re.findall(r'url\(["\']?(assets/[^)"\']+)',html,flags=re.I))
           fetched={}
           for p in sorted(paths):
-              # styles/app are already inlined; avoid replacing their former references if regex found stale fragments.
               if p in ('assets/styles.css','assets/app.js'): continue
-              url=host+p
-              req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'})
+              req=urllib.request.Request(host+p,headers={'User-Agent':'Mozilla/5.0'})
               with urllib.request.urlopen(req,timeout=35) as r: data=r.read()
               mime=mimetypes.guess_type(p)[0] or 'application/octet-stream'
               if p.endswith('.svg'): mime='image/svg+xml'
               uri=f'data:{mime};base64,'+base64.b64encode(data).decode('ascii')
               fetched[p]={'bytes':len(data),'mime':mime}
               html=html.replace('"'+p+'"','"'+uri+'"').replace("'"+p+"'","'"+uri+"'")
-          # Mobile reliability patch: on phone-sized viewports disable GPU-heavy decorative displacement and
-          # avoid a smooth-scroll delay when the browser restores anchors/history. Keep desktop unchanged.
           patch='''<style id="mobile-reliability-fix">
           @media (max-width:800px){
             html{scroll-behavior:auto!important}
@@ -56,8 +50,11 @@ jobs:
           @media (max-width:390px){.hero-art{inset:0 -8% 0 8%!important}.hero-art img{object-position:56% center!important}}
           </style>'''
           html=html.replace('</head>',patch+'</head>',1)
-          # Provenance marker, invisible.
           html=html.replace('</body>','<!-- mobile-fixed: source sha e54cc952bd515e97fc4d044bcd8f93eea4443610; bundled 2026-08-30 -->\n</body>',1)
+          if re.search(r'(?:src|href)=["\']assets/',html,re.I):
+              raise SystemExit('LOCAL_ASSET_REF_REMAINS')
+          if 'mobile-fixed: source sha e54cc952' not in html:
+              raise SystemExit('PROVENANCE_MARKER_MISSING')
           pathlib.Path('fixed/index.html').write_text(html,encoding='utf-8')
           pathlib.Path('fixed/README.txt').write_text(
               'HF mobile-fixed self-contained build\nSource: i99er/igor-portfolio @ e54cc952bd515e97fc4d044bcd8f93eea4443610\n'
@@ -66,8 +63,6 @@ jobs:
           pathlib.Path('fixed/bundle-report.json').write_text(json.dumps({'source_sha':'e54cc952bd515e97fc4d044bcd8f93eea4443610','embedded':fetched,'html_bytes':len(html.encode())},ensure_ascii=False,indent=2),encoding='utf-8')
           print('BUNDLE',len(html.encode()),'bytes; embedded',len(fetched),'assets',sum(x['bytes'] for x in fetched.values()),'source bytes')
           PY
-          grep -q 'mobile-fixed: source sha e54cc952' fixed/index.html
-          if grep -Eq '(src|href)=["'"']assets/' fixed/index.html; then echo 'LOCAL_ASSET_REF_REMAINS'; grep -Eo '(src|href)=["'"']assets/[^"'"']+' fixed/index.html | head; exit 1; fi
           sha256sum fixed/index.html > fixed/SHA256SUMS.txt
       - name: Inspect exact HF headers
         shell: bash
@@ -111,7 +106,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -f fixed/test.mjs fixed/*.png fixed/bundle-report.json fixed/live-headers.txt fixed/verification.json
+          cp fixed/webkit-390.png fixed/mobile-preview.png
+          cp fixed/chromium-1440.png fixed/desktop-preview.png
+          rm -f fixed/test.mjs fixed/webkit-320.png fixed/webkit-390.png fixed/webkit-430.png fixed/chromium-390.png fixed/chromium-1440.png fixed/bundle-report.json fixed/live-headers.txt fixed/verification.json
           (cd fixed && zip -9 -q ../igor-portfolio-mobile-fixed.zip index.html README.txt SHA256SUMS.txt)
           sha256sum igor-portfolio-mobile-fixed.zip
       - uses: actions/upload-artifact@v4
@@ -121,5 +118,7 @@ jobs:
             fixed/index.html
             fixed/README.txt
             fixed/SHA256SUMS.txt
+            fixed/mobile-preview.png
+            fixed/desktop-preview.png
             igor-portfolio-mobile-fixed.zip
           retention-days: 1
