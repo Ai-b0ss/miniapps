@@ -1,19 +1,19 @@
 HTTP/2 200 
 content-type: text/html; charset=utf-8
 content-length: 21839
-date: Sun, 30 Aug 2026 00:40:30 GMT
-etag: W/"554f-oExRcoaMTVC3aeglMRe43xKEGao"
+date: Sun, 30 Aug 2026 00:42:28 GMT
+etag: W/"554f-l7RpdH8JBy/EtU210IB2KsK6Is4"
 x-powered-by: huggingface-moon
-x-request-id: Root=1-6a937bfe-3ba37bbe266252ff39a92065
-ratelimit: "pages";r=99;t=27
+x-request-id: Root=1-6a937c73-7a3f5a4c49e4af6a4d352da2
+ratelimit: "pages";r=99;t=233
 ratelimit-policy: "fixed window";"pages";q=100;w=300
 cross-origin-opener-policy: same-origin
 referrer-policy: strict-origin-when-cross-origin
 x-frame-options: DENY
 x-cache: Miss from cloudfront
-via: 1.1 e758e6512b4c08d28af121962cc722ce.cloudfront.net (CloudFront)
-x-amz-cf-pop: SFO5-P1
+via: 1.1 1e5d213252e38a8aa2e2a927fd3c3754.cloudfront.net (CloudFront)
+x-amz-cf-pop: IAD55-P8
 alt-svc: h3=":443"; ma=86400
-x-amz-cf-id: KKcvlvgH3cyxdiRmRO7RjBBPlu2aUfmNhFkoT4jfatm7SfAmW2nSnw==
+x-amz-cf-id: FtPmIUR8FhMUnPTIdPR8Njl-R0E68hsZd-qUJUzuDHwkdtSGWGhOSg==
 strict-transport-security: max-age=31536000
 
