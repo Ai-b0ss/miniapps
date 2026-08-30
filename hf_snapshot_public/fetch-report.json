@@ -1,0 +1,27 @@
+[
+  {
+    "path": "README.md",
+    "bytes": 691,
+    "ok": true
+  },
+  {
+    "path": "assets/app.js",
+    "bytes": 12420,
+    "ok": true
+  },
+  {
+    "path": "assets/styles.css",
+    "bytes": 68632,
+    "ok": true
+  },
+  {
+    "path": "index.html",
+    "bytes": 34650,
+    "ok": true
+  },
+  {
+    "path": "robots.txt",
+    "bytes": 82,
+    "ok": true
+  }
+]
