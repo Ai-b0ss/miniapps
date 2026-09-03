@@ -1,0 +1,35 @@
+name: Free Fabric Public Harness
+
+on:
+  push:
+    paths:
+      - 'free-fabric-ci-harness/**'
+      - '.github/workflows/free-fabric-ci-harness.yml'
+  pull_request:
+    paths:
+      - 'free-fabric-ci-harness/**'
+      - '.github/workflows/free-fabric-ci-harness.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  public-harness:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: free-fabric-ci-harness
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Run public harness regressions
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
