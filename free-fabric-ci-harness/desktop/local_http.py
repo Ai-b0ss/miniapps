@@ -25,15 +25,26 @@ def _guard_response_body(response):
     return response
 
 
+def _validated_target(req: urllib.request.Request) -> tuple[str, int | None]:
+    try:
+        parsed = urllib.parse.urlsplit(req.full_url)
+    except ValueError as exc:
+        raise urllib.error.URLError("loopback_url_invalid") from exc
+    if parsed.scheme != "http" or not parsed.hostname:
+        raise urllib.error.URLError("loopback_url_invalid")
+    if parsed.username is not None or parsed.password is not None or parsed.fragment:
+        raise urllib.error.URLError("loopback_url_invalid")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise urllib.error.URLError("loopback_url_invalid") from exc
+    return parsed.hostname.lower().rstrip("."), port
+
+
 class LoopbackOnlyHTTPHandler(urllib.request.HTTPHandler):
     def http_open(self, req):
-        parsed = urllib.parse.urlsplit(req.full_url)
-        host = (parsed.hostname or "").lower().rstrip(".")
+        host, port = _validated_target(req)
         if host == "localhost":
-            try:
-                port = parsed.port
-            except ValueError as exc:
-                raise urllib.error.URLError("loopback_ip_required") from exc
             req.host = "127.0.0.1" + (f":{port}" if port is not None else "")
         else:
             try:
